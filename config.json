@@ -1,0 +1,11 @@
+{
+    "model_path": "models/azuki-maid.pure.psb.zip",
+    "config_js": "azuki-config.js",
+    "scale": 0.4,
+    "window_width": 500,
+    "window_height": 500,
+    "window_x": 940,
+    "window_y": 416,
+    "locked": true,
+    "click_through": false
+}
