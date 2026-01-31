@@ -17,7 +17,7 @@
 * **位置锁定**：防止误触导致桌宠被拖动（穿透模式下强制开启）。
 
 ## 🥰 功能展示
-<video src="https://github.com/kylin930/NekoparaDesktopPet/blob/main/2026-01-31%2021-04-30.mp4" controls="controls" width="500" height="300"></video>
+<video src="https://raw.githubusercontent.com/kylin930/NekoparaDesktopPet/refs/heads/main/2026-01-31%2021-04-30.mp4" controls="controls" width="500" height="300"></video>
 
 ## 🛠️ 技术致谢 (Credits)
 
