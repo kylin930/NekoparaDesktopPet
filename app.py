@@ -114,7 +114,17 @@ HTML_TEMPLATE = f"""
     <meta charset="UTF-8">
     <style>
         body {{ margin: 0; overflow: hidden; background-color: transparent; font-family: sans-serif; }}
-        canvas {{ display: block; width: 100%; height: 100%; opacity: 0; transition: opacity 0.5s ease; }}
+        /* 使用 image-rendering: high-quality 提示浏览器使用高质量缩放算法 
+           注意：Canvas 实际像素是屏幕的2倍，这里 CSS 强制撑满窗口，从而产生缩小（平滑）效果
+        */
+        canvas {{ 
+            display: block; 
+            width: 100%; 
+            height: 100%; 
+            opacity: 0; 
+            transition: opacity 0.5s ease;
+            image-rendering: -webkit-optimize-contrast; 
+        }}
         canvas.loaded {{ opacity: 1; }}
         #loader-container {{
             position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
@@ -161,6 +171,9 @@ HTML_TEMPLATE = f"""
         var reactionConfig = {{}};
         var currentScale = __INIT_SCALE__;
         var isTouching = false;
+        
+        // === 优化点 1: 定义超采样倍率 (2.0 = 2倍抗锯齿) ===
+        var ratioMultiplier = 2.0; 
 
         if (typeof getConfig === 'function') {{
             reactionConfig = getConfig();
@@ -169,12 +182,12 @@ HTML_TEMPLATE = f"""
         async function init() {{
             var canvas = document.getElementById('canvas');
 
-            // Initial resize
             resizeCanvas();
             window.onresize = resizeCanvas;
 
+            // === 优化点 2: 传递给 EmotePlayer 的也是高 DPI 分辨率 ===
             if (EmotePlayer.createRenderCanvas) {{
-                var dpr = window.devicePixelRatio || 1;
+                var dpr = (window.devicePixelRatio || 1) * ratioMultiplier;
                 EmotePlayer.createRenderCanvas(window.innerWidth * dpr, window.innerHeight * dpr);
             }}
             player = new EmotePlayer(canvas);
@@ -198,7 +211,8 @@ HTML_TEMPLATE = f"""
 
                 await player.promiseLoadDataFromURL(finalUrl);
 
-                player.scale = currentScale;
+                // === 优化点 3: 应用初始缩放时，乘以超采样倍率 ===
+                player.scale = currentScale * ratioMultiplier;
 
                 var c = player.coord;
                 c[1] -= 40;
@@ -217,23 +231,27 @@ HTML_TEMPLATE = f"""
 
         function resizeCanvas() {{
             var canvas = document.getElementById('canvas');
-            var dpr = window.devicePixelRatio || 1;
+            // === 优化点 4: 画布物理分辨率为 屏幕像素 * 2，实现超采样 ===
+            var dpr = (window.devicePixelRatio || 1) * ratioMultiplier;
             canvas.width = window.innerWidth * dpr;
             canvas.height = window.innerHeight * dpr;
             if (player) {{
-                player.scale = currentScale;
+                // 窗口大小改变时，保持视觉缩放比例正确
+                player.scale = currentScale * ratioMultiplier;
             }}
         }}
 
         window.updateModelScale = function(s) {{
             currentScale = s;
             if(player) {{
-                player.scale = currentScale;
+                // 动态更新缩放时，同样乘以倍率
+                player.scale = currentScale * ratioMultiplier;
             }}
         }};
 
         window.updateEyeTracking = function(x, y) {{
             if (!player) return;
+            // 眼神追踪使用相对坐标(-1 到 1)，不需要修改倍率
             var rawX = x * 500; var rawY = y * 500;
             var len = Math.sqrt(rawX*rawX + rawY*rawY);
             var angle = Math.atan2(rawY, rawX);
@@ -277,7 +295,12 @@ HTML_TEMPLATE = f"""
 
         window.handleClick = function(x, y) {{
             if (!player || isTouching) return;
-            var ev = {{ clientX: x, clientY: y }};
+            // === 优化点 5: 点击坐标修正 ===
+            // 传入的 x, y 是窗口逻辑坐标。
+            // 画布内部是高分辨率，所以需要乘以 dpr 和 ratioMultiplier
+            var dpr = (window.devicePixelRatio || 1) * ratioMultiplier;
+            var ev = {{ clientX: x * dpr, clientY: y * dpr }};
+            
             const getPos = (name) => {{ try {{ return player.getMarkerPosition(name); }} catch(e) {{ return null; }} }};
             const calcDist = (nameA, nameB, extraY=0) => {{
                 let cx, cy;
@@ -286,6 +309,7 @@ HTML_TEMPLATE = f"""
                 if (mA && mB) {{ cx = (mA.clientX + mB.clientX) / 2; cy = (mA.clientY + mB.clientY) / 2; }}
                 else if (mA) {{ cx = mA.clientX; cy = mA.clientY; }}
                 else {{ return 9999; }}
+                // 注意：EmotePlayer 的 getMarkerPosition 返回的通常是画布内坐标
                 return Math.sqrt(Math.pow(cx - ev.clientX, 2) + Math.pow(cy + extraY - ev.clientY, 2));
             }};
             const bustLength = calcDist('bust');
@@ -295,7 +319,9 @@ HTML_TEMPLATE = f"""
             const pantLength = calcDist('pantAX', 'pantBX');
 
             const tryReact = (dist, threshold, reactions) => {{
-                if (dist < threshold && reactions && reactions.length) {{
+                // 阈值也需要适配高分屏吗？通常距离是像素单位，如果画面大了2倍，距离阈值也可以适当放宽
+                // 但因为我们计算的是欧氏距离，保持原样通常也能触发，或者稍微乘以 ratioMultiplier
+                if (dist < threshold * ratioMultiplier && reactions && reactions.length) {{
                     isTouching = true;
                     const selected = reactions[Math.floor(Math.random() * reactions.length)];
                     applyReactionConfig(selected.reaction);
@@ -307,6 +333,7 @@ HTML_TEMPLATE = f"""
                 }}
                 return false;
             }};
+            // 稍微调大阈值以适应高分屏下的点击误差
             if (tryReact(bustLength, 100, reactionConfig.bust)) return;
             if (tryReact(eyeLength, 50, reactionConfig.eye)) return;
             if (tryReact(faceLength, 80, reactionConfig.face)) return;
@@ -624,6 +651,10 @@ if __name__ == '__main__':
     os.environ["QT_API"] = "pyqt6"
     sys.argv.append("--disable-web-security")
     sys.argv.append("--autoplay-policy=no-user-gesture-required")
+    sys.argv.append("--enable-gpu-rasterization")
+    sys.argv.append("--ignore-gpu-blocklist")
+    sys.argv.append("--enable-webgl-image-chromium")
+    sys.argv.append("--gl-options=msaa-sample-count=4")
 
     app = QApplication(sys.argv)
 
