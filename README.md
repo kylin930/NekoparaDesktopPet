@@ -48,10 +48,10 @@ FreeMote-Desktop-Pet/
 
 ### 2. 安装依赖
 
-本项目主要依赖 PyQt6 和 WebEngine。
+本项目主要依赖 PyQt6 和 WebEngine，http服务器依赖flask、flask_cors
 
 ```bash
-pip install PyQt6 PyQt6-WebEngine
+pip install PyQt6 PyQt6-WebEngine flask flask_cors
 
 ```
 
