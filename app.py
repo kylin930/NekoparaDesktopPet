@@ -91,7 +91,7 @@ MODEL_LIBRARY = {
 }
 
 DEFAULT_CONFIG = {
-    "model_path": "models/vanilla-maid.pure.psb.zip.zip",
+    "model_path": "models/vanilla-maid.pure.psb.zip",
     "config_js": "vanilla-config.js",
     "scale": 0.5,
     "window_width": 600,
@@ -471,7 +471,7 @@ class FreeMotePet(QMainWindow):
 
         self.is_locked = self.config.get("locked", False)
         self.is_click_through = self.config.get("click_through", False)
-        self.current_model_path = self.config.get("model_path", "models/vanilla-maid.pure.psb.zip.zip")
+        self.current_model_path = self.config.get("model_path", "models/vanilla-maid.pure.psb.zip")
         self.current_config_js = self.config.get("config_js", "vanilla-config.js")
 
         self.webview = QWebEngineView(self)
