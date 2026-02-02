@@ -91,7 +91,7 @@ MODEL_LIBRARY = {
 }
 
 DEFAULT_CONFIG = {
-    "model_path": "models/vanilla-maid.pure.psb.zip",
+    "model_path": "models/vanilla-maid.pure.psb.zip.zip",
     "config_js": "vanilla-config.js",
     "scale": 0.5,
     "window_width": 600,
@@ -99,7 +99,9 @@ DEFAULT_CONFIG = {
     "window_x": 100,
     "window_y": 100,
     "locked": False,
-    "click_through": False
+    "click_through": False,
+    "render_ratio": 2.0,
+    "tracking_interval": 50
 }
 
 HTML_TEMPLATE = f"""
@@ -166,9 +168,8 @@ HTML_TEMPLATE = f"""
         var reactionConfig = {{}};
         var currentScale = __INIT_SCALE__;
         var isTouching = false;
-        
-        // === 优化点 1: 定义超采样倍率 (2.0 = 2倍抗锯齿) ===
-        var ratioMultiplier = 2.0; 
+
+        var ratioMultiplier = __RENDER_RATIO__;
 
         if (typeof getConfig === 'function') {{
             reactionConfig = getConfig();
@@ -180,7 +181,6 @@ HTML_TEMPLATE = f"""
             resizeCanvas();
             window.onresize = resizeCanvas;
 
-            // === 优化点 2: 传递给 EmotePlayer 的也是高 DPI 分辨率 ===
             if (EmotePlayer.createRenderCanvas) {{
                 var dpr = (window.devicePixelRatio || 1) * ratioMultiplier;
                 EmotePlayer.createRenderCanvas(window.innerWidth * dpr, window.innerHeight * dpr);
@@ -363,7 +363,7 @@ class ConfigManager:
         except Exception: pass
 
 class SettingsDialog(QDialog):
-    def __init__(self, current_scale, current_w, current_h, parent=None):
+    def __init__(self, current_scale, current_w, current_h, current_ratio, current_interval, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
         layout = QFormLayout(self)
@@ -373,6 +373,20 @@ class SettingsDialog(QDialog):
         self.scale_spin.setSingleStep(0.05)
         self.scale_spin.setValue(current_scale)
         layout.addRow("模型缩放 (Scale):", self.scale_spin)
+
+        self.ratio_spin = QDoubleSpinBox()
+        self.ratio_spin.setRange(0.5, 3.0)
+        self.ratio_spin.setSingleStep(0.1)
+        self.ratio_spin.setValue(current_ratio)
+        self.ratio_spin.setToolTip("1.0为标准，默认为2.0两倍渲染")
+        layout.addRow("渲染倍率:", self.ratio_spin)
+
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(20, 1000)
+        self.interval_spin.setSingleStep(10)
+        self.interval_spin.setValue(current_interval)
+        self.interval_spin.setToolTip("全屏追踪鼠标位置的等待间隔，默认值为50ms")
+        layout.addRow("追踪间隔 (ms):", self.interval_spin)
 
         self.w_spin = QSpinBox()
         self.w_spin.setRange(200, 3000)
@@ -389,7 +403,8 @@ class SettingsDialog(QDialog):
         layout.addRow(btn)
 
     def get_values(self):
-        return self.scale_spin.value(), self.w_spin.value(), self.h_spin.value()
+        return (self.scale_spin.value(), self.w_spin.value(), self.h_spin.value(),
+                self.ratio_spin.value(), self.interval_spin.value())
 
 class TransparentCover(QWidget):
     def __init__(self, parent=None):
@@ -451,8 +466,6 @@ class TransparentCover(QWidget):
         menu.addSeparator()
         act1 = QAction("设置", self); act1.triggered.connect(self.parent_window.open_settings_dialog); menu.addAction(act1)
         act2 = QAction("刷新页面", self); act2.triggered.connect(self.parent_window.webview.reload); menu.addAction(act2)
-
-        # === 修复点 1: 右键菜单使用 quit_app ===
         act3 = QAction("退出程序", self); act3.triggered.connect(self.parent_window.quit_app); menu.addAction(act3)
 
         menu.exec(global_pos)
@@ -468,10 +481,12 @@ class FreeMotePet(QMainWindow):
         self.current_scale = self.config.get("scale", 0.5)
         self.current_w = self.config.get("window_width", 600)
         self.current_h = self.config.get("window_height", 1000)
+        self.current_render_ratio = self.config.get("render_ratio", 2.0)
+        self.current_interval = self.config.get("tracking_interval", 50)
 
         self.is_locked = self.config.get("locked", False)
         self.is_click_through = self.config.get("click_through", False)
-        self.current_model_path = self.config.get("model_path", "models/vanilla-maid.pure.psb.zip")
+        self.current_model_path = self.config.get("model_path", "models/vanilla-maid.pure.psb.zip.zip")
         self.current_config_js = self.config.get("config_js", "vanilla-config.js")
 
         self.webview = QWebEngineView(self)
@@ -490,9 +505,11 @@ class FreeMotePet(QMainWindow):
 
         self.init_tray_icon()
 
+        self.last_cursor_pos = None
+
         self.tracker_timer = QTimer(self)
         self.tracker_timer.timeout.connect(self.update_eye_tracking)
-        self.tracker_timer.start(50)
+        self.tracker_timer.start(self.current_interval)
 
     def init_tray_icon(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -591,7 +608,8 @@ class FreeMotePet(QMainWindow):
 
         final_html = HTML_TEMPLATE.replace('__MODEL_URL__', full_model_url) \
                                   .replace('__CONFIG_URL__', full_config_url) \
-                                  .replace('__INIT_SCALE__', str(self.current_scale))
+                                  .replace('__INIT_SCALE__', str(self.current_scale)) \
+                                  .replace('__RENDER_RATIO__', str(self.current_render_ratio))
 
         self.webview.setHtml(final_html, QUrl(LOCAL_SERVER + "/"))
         self.config["model_path"] = model_path
@@ -601,25 +619,46 @@ class FreeMotePet(QMainWindow):
         self.webview.page().runJavaScript(f"if(window.handleClick) handleClick({x}, {y});")
 
     def open_settings_dialog(self):
-        dialog = SettingsDialog(self.current_scale, self.current_w, self.current_h, self)
+        dialog = SettingsDialog(self.current_scale, self.current_w, self.current_h, self.current_render_ratio, self.current_interval, self)
         if dialog.exec():
-            s, w, h = dialog.get_values()
+            s, w, h, ratio, interval = dialog.get_values()
+
+            need_reload = (ratio != self.current_render_ratio)
 
             self.current_scale = s
             self.current_w = w
             self.current_h = h
+            self.current_render_ratio = ratio
+            self.current_interval = interval
 
             self.resize(w, h)
-            self.webview.page().runJavaScript(f"if(window.updateModelScale) updateModelScale({s});")
+
+            if not need_reload:
+                self.webview.page().runJavaScript(f"if(window.updateModelScale) updateModelScale({s});")
+
+            self.tracker_timer.setInterval(interval)
 
             self.config["scale"] = s
             self.config["window_width"] = w
             self.config["window_height"] = h
+            self.config["render_ratio"] = ratio
+            self.config["tracking_interval"] = interval
             ConfigManager.save(self.config)
+
+            if need_reload:
+                self.load_model(self.current_model_path, self.current_config_js)
 
     def update_eye_tracking(self):
         if not self.isVisible(): return
         global_cursor = QCursor.pos()
+
+        if self.last_cursor_pos:
+            diff = global_cursor - self.last_cursor_pos
+            if diff.manhattanLength() < 5:
+                return
+
+        self.last_cursor_pos = global_cursor
+
         window_geo = self.geometry()
         cx, cy = window_geo.x() + window_geo.width()/2, window_geo.y() + window_geo.height()/2
         dx, dy = global_cursor.x() - cx, global_cursor.y() - cy
@@ -638,6 +677,8 @@ class FreeMotePet(QMainWindow):
         self.config["click_through"] = self.is_click_through
         self.config["window_width"] = self.width()
         self.config["window_height"] = self.height()
+        self.config["render_ratio"] = self.current_render_ratio
+        self.config["tracking_interval"] = self.current_interval
         ConfigManager.save(self.config)
         event.accept()
 
