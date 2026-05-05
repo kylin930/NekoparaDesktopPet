@@ -1,6 +1,10 @@
 import sys
 import os
 import json
+import threading
+import logging
+from flask import Flask, send_from_directory
+from flask_cors import CORS
 from PyQt6.QtCore import Qt, QTimer, QUrl, QCoreApplication
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QMenu, QDialog,
                              QFormLayout, QDoubleSpinBox, QSpinBox,
@@ -91,7 +95,7 @@ MODEL_LIBRARY = {
 }
 
 DEFAULT_CONFIG = {
-    "model_path": "models/vanilla-maid.pure.psb.zip.zip",
+    "model_path": "models/vanilla-maid.pure.psb.zip",
     "config_js": "vanilla-config.js",
     "scale": 0.5,
     "window_width": 600,
@@ -111,9 +115,6 @@ HTML_TEMPLATE = f"""
     <meta charset="UTF-8">
     <style>
         body {{ margin: 0; overflow: hidden; background-color: transparent; font-family: sans-serif; }}
-        /* 使用 image-rendering: high-quality 提示浏览器使用高质量缩放算法 
-           注意：Canvas 实际像素是屏幕的2倍，这里 CSS 强制撑满窗口，从而产生缩小（平滑）效果
-        */
         canvas {{ 
             display: block; 
             width: 100%; 
@@ -168,7 +169,6 @@ HTML_TEMPLATE = f"""
         var reactionConfig = {{}};
         var currentScale = __INIT_SCALE__;
         var isTouching = false;
-
         var ratioMultiplier = __RENDER_RATIO__;
 
         if (typeof getConfig === 'function') {{
@@ -177,7 +177,6 @@ HTML_TEMPLATE = f"""
 
         async function init() {{
             var canvas = document.getElementById('canvas');
-
             resizeCanvas();
             window.onresize = resizeCanvas;
 
@@ -205,19 +204,14 @@ HTML_TEMPLATE = f"""
                 }}
 
                 await player.promiseLoadDataFromURL(finalUrl);
-
-                // === 优化点 3: 应用初始缩放时，乘以超采样倍率 ===
                 player.scale = currentScale * ratioMultiplier;
-
                 var c = player.coord;
                 c[1] -= 40;
                 player.coord = c;
-
                 player.diffTimelineSlot4 = '差分用_waiting_loop';
 
                 document.getElementById('loader-container').classList.add('fade-out');
                 canvas.classList.add('loaded');
-
             }} catch (e) {{
                 console.error("Load Error:", e);
                 document.querySelector('.path').style.stroke = 'red';
@@ -226,27 +220,21 @@ HTML_TEMPLATE = f"""
 
         function resizeCanvas() {{
             var canvas = document.getElementById('canvas');
-            // === 优化点 4: 画布物理分辨率为 屏幕像素 * 2，实现超采样 ===
             var dpr = (window.devicePixelRatio || 1) * ratioMultiplier;
             canvas.width = window.innerWidth * dpr;
             canvas.height = window.innerHeight * dpr;
             if (player) {{
-                // 窗口大小改变时，保持视觉缩放比例正确
                 player.scale = currentScale * ratioMultiplier;
             }}
         }}
 
         window.updateModelScale = function(s) {{
             currentScale = s;
-            if(player) {{
-                // 动态更新缩放时，同样乘以倍率
-                player.scale = currentScale * ratioMultiplier;
-            }}
+            if(player) player.scale = currentScale * ratioMultiplier;
         }};
 
         window.updateEyeTracking = function(x, y) {{
             if (!player) return;
-            // 眼神追踪使用相对坐标(-1 到 1)，不需要修改倍率
             var rawX = x * 500; var rawY = y * 500;
             var len = Math.sqrt(rawX*rawX + rawY*rawY);
             var angle = Math.atan2(rawY, rawX);
@@ -290,9 +278,6 @@ HTML_TEMPLATE = f"""
 
         window.handleClick = function(x, y) {{
             if (!player || isTouching) return;
-            // === 优化点 5: 点击坐标修正 ===
-            // 传入的 x, y 是窗口逻辑坐标。
-            // 画布内部是高分辨率，所以需要乘以 dpr 和 ratioMultiplier
             var dpr = (window.devicePixelRatio || 1) * ratioMultiplier;
             var ev = {{ clientX: x * dpr, clientY: y * dpr }};
             
@@ -304,9 +289,9 @@ HTML_TEMPLATE = f"""
                 if (mA && mB) {{ cx = (mA.clientX + mB.clientX) / 2; cy = (mA.clientY + mB.clientY) / 2; }}
                 else if (mA) {{ cx = mA.clientX; cy = mA.clientY; }}
                 else {{ return 9999; }}
-                // 注意：EmotePlayer 的 getMarkerPosition 返回的通常是画布内坐标
                 return Math.sqrt(Math.pow(cx - ev.clientX, 2) + Math.pow(cy + extraY - ev.clientY, 2));
             }};
+            
             const bustLength = calcDist('bust');
             const eyeLength = calcDist('eye');
             const headLength = calcDist('headAX', 'headBX');
@@ -314,8 +299,6 @@ HTML_TEMPLATE = f"""
             const pantLength = calcDist('pantAX', 'pantBX');
 
             const tryReact = (dist, threshold, reactions) => {{
-                // 阈值也需要适配高分屏吗？通常距离是像素单位，如果画面大了2倍，距离阈值也可以适当放宽
-                // 但因为我们计算的是欧氏距离，保持原样通常也能触发，或者稍微乘以 ratioMultiplier
                 if (dist < threshold * ratioMultiplier && reactions && reactions.length) {{
                     isTouching = true;
                     const selected = reactions[Math.floor(Math.random() * reactions.length)];
@@ -328,7 +311,7 @@ HTML_TEMPLATE = f"""
                 }}
                 return false;
             }};
-            // 稍微调大阈值以适应高分屏下的点击误差
+
             if (tryReact(bustLength, 100, reactionConfig.bust)) return;
             if (tryReact(eyeLength, 50, reactionConfig.eye)) return;
             if (tryReact(faceLength, 80, reactionConfig.face)) return;
@@ -341,6 +324,23 @@ HTML_TEMPLATE = f"""
 </body>
 </html>
 """
+
+def run_flask_server(static_dir):
+    app = Flask(__name__, static_folder=None)
+    CORS(app, resources={r"/*": {"origins": "*"}})
+
+    # 配置日志: 让 Werkzeug 日志打印到控制台，这样就能看到请求信息
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.INFO)
+
+    @app.route('/', defaults={'path': 'index.html'})
+    @app.route('/<path:path>')
+    def serve(path):
+        return send_from_directory(static_dir, path)
+
+    print(f"[Flask Server] 启动于 http://127.0.0.1:53421, 提供服务目录: {os.path.abspath(static_dir)}")
+    # use_reloader=False 是必须的，否则 Flask 会尝试在非主线程重启导致崩溃
+    app.run(host='127.0.0.1', port=53421, threaded=True, use_reloader=False)
 
 class ConfigManager:
     @staticmethod
@@ -486,7 +486,7 @@ class FreeMotePet(QMainWindow):
 
         self.is_locked = self.config.get("locked", False)
         self.is_click_through = self.config.get("click_through", False)
-        self.current_model_path = self.config.get("model_path", "models/vanilla-maid.pure.psb.zip.zip")
+        self.current_model_path = self.config.get("model_path", "models/vanilla-maid.pure.psb.zip")
         self.current_config_js = self.config.get("config_js", "vanilla-config.js")
 
         self.webview = QWebEngineView(self)
@@ -539,7 +539,6 @@ class FreeMotePet(QMainWindow):
         tray_menu.addAction(self.click_through_action_tray)
         tray_menu.addSeparator()
 
-        # === 修复点 2: 托盘菜单使用 quit_app ===
         quit_action = QAction("退出", self)
         quit_action.triggered.connect(self.quit_app)
         tray_menu.addAction(quit_action)
@@ -548,16 +547,11 @@ class FreeMotePet(QMainWindow):
         self.tray_icon.show()
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
 
-    # === 修复点 3: 专门的完全退出函数 ===
     def quit_app(self):
-        # 1. 停止计时器
         if self.tracker_timer.isActive():
             self.tracker_timer.stop()
-        # 2. 显式隐藏托盘图标（关键步骤，否则图标会导致进程残留）
         self.tray_icon.hide()
-        # 3. 触发关闭事件以保存配置
         self.close()
-        # 4. 强制退出应用程序
         QCoreApplication.quit()
 
     def on_tray_icon_activated(self, reason):
@@ -622,7 +616,6 @@ class FreeMotePet(QMainWindow):
         dialog = SettingsDialog(self.current_scale, self.current_w, self.current_h, self.current_render_ratio, self.current_interval, self)
         if dialog.exec():
             s, w, h, ratio, interval = dialog.get_values()
-
             need_reload = (ratio != self.current_render_ratio)
 
             self.current_scale = s
@@ -683,6 +676,16 @@ class FreeMotePet(QMainWindow):
         event.accept()
 
 if __name__ == '__main__':
+    # 提前获取可能的命令行参数 (避免 PyQt 接收特定的标志位后产生冲突)
+    static_dir = '.'
+    if len(sys.argv) > 1 and not sys.argv[1].startswith('--'):
+        static_dir = sys.argv[1]
+
+    # 1. 以守护线程的方式启动 Flask 服务器
+    flask_thread = threading.Thread(target=run_flask_server, args=(static_dir,), daemon=True)
+    flask_thread.start()
+
+    # 2. 启动 PyQt 主程序
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
     os.environ["QT_API"] = "pyqt6"
     sys.argv.append("--disable-web-security")
@@ -693,8 +696,6 @@ if __name__ == '__main__':
     sys.argv.append("--gl-options=msaa-sample-count=4")
 
     app = QApplication(sys.argv)
-
-    # === 建议添加: 确保在最后一个窗口关闭时不自动退出，由我们的 quit_app 接管 ===
     app.setQuitOnLastWindowClosed(False)
 
     pet = FreeMotePet()
